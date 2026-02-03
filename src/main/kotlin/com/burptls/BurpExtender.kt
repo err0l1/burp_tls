@@ -7,10 +7,10 @@ import javax.swing.*
 /**
  * Burp Suite TLS Fingerprint Randomizer Extension
  * 
- * 通过劫持 Burp 的 HTTP 请求，转发到本地 Go 代理服务器，
- * 使用 uTLS 库实现 TLS 指纹随机化/伪装
+ * 启动 Go TLS 代理，需要在 Burp 中配置上游代理
+ * Go 代理使用 uTLS 库实现 TLS 指纹伪装
  */
-class BurpExtender : IBurpExtender, ITab, IHttpListener, IExtensionStateListener {
+class BurpExtender : IBurpExtender, ITab, IExtensionStateListener {
     
     private lateinit var callbacks: IBurpExtenderCallbacks
     private lateinit var helpers: IExtensionHelpers
@@ -44,16 +44,21 @@ class BurpExtender : IBurpExtender, ITab, IHttpListener, IExtensionStateListener
             callbacks.addSuiteTab(this)
         }
         
-        // 注册 HTTP 监听器
-        callbacks.registerHttpListener(this)
-        
         // 注册扩展状态监听器
         callbacks.registerExtensionStateListener(this)
         
         // 启动 Go 代理服务器
         try {
             proxyManager.start()
-            stdout.println("[$EXTENSION_NAME] Go proxy server started successfully")
+            val port = proxyManager.getProxyPort()
+            stdout.println("[$EXTENSION_NAME] ========================================")
+            stdout.println("[$EXTENSION_NAME] Go TLS 代理已启动，端口: $port")
+            stdout.println("[$EXTENSION_NAME] ")
+            stdout.println("[$EXTENSION_NAME] 配置方法:")
+            stdout.println("[$EXTENSION_NAME] 1. Settings -> Network -> Connections")
+            stdout.println("[$EXTENSION_NAME] 2. Upstream proxy servers -> Add")
+            stdout.println("[$EXTENSION_NAME] 3. Destination: *  Proxy: 127.0.0.1:$port")
+            stdout.println("[$EXTENSION_NAME] ========================================")
         } catch (e: Exception) {
             stderr.println("[$EXTENSION_NAME] Failed to start Go proxy: ${e.message}")
         }
@@ -64,43 +69,6 @@ class BurpExtender : IBurpExtender, ITab, IHttpListener, IExtensionStateListener
     override fun getTabCaption(): String = "TLS Fingerprint"
     
     override fun getUiComponent(): java.awt.Component = mainPanel
-    
-    override fun processHttpMessage(toolFlag: Int, messageIsRequest: Boolean, messageInfo: IHttpRequestResponse) {
-        if (!messageIsRequest) return
-        if (!mainPanel.isTlsEnabled()) return
-        
-        // 检查是否需要处理此请求
-        val service = messageInfo.httpService
-        if (service.protocol != "https") return
-        
-        // 修改请求，通过 Go 代理转发（使用 HTTP 连接到本地代理）
-        try {
-            val newService = helpers.buildHttpService(
-                "127.0.0.1",
-                proxyManager.getProxyPort(),
-                false  // 使用 HTTP 连接到本地代理
-            )
-            
-            // 添加原始目标主机头
-            val request = messageInfo.request
-            val analyzedRequest = helpers.analyzeRequest(messageInfo)
-            val headers = analyzedRequest.headers.toMutableList()
-            
-            // 添加自定义头以传递原始目标
-            headers.add("X-TLS-Target-Host: ${service.host}")
-            headers.add("X-TLS-Target-Port: ${service.port}")
-            headers.add("X-TLS-Fingerprint: ${mainPanel.getSelectedFingerprint()}")
-            
-            val body = request.copyOfRange(analyzedRequest.bodyOffset, request.size)
-            val newRequest = helpers.buildHttpMessage(headers, body)
-            
-            messageInfo.request = newRequest
-            messageInfo.httpService = newService
-            
-        } catch (e: Exception) {
-            stderr.println("[$EXTENSION_NAME] Error processing request: ${e.message}")
-        }
-    }
     
     override fun extensionUnloaded() {
         stdout.println("[$EXTENSION_NAME] Unloading extension...")

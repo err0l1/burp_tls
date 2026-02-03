@@ -21,6 +21,7 @@ class TlsConfigPanel(
     private val ja3DisplayArea: JTextArea
     private val customJa3Area: JTextArea
     private val useCustomCheckbox: JCheckBox
+    private val modeComboBox: JComboBox<String>
     
     // 预定义的 TLS 指纹
     private val predefinedFingerprints = linkedMapOf(
@@ -48,13 +49,25 @@ class TlsConfigPanel(
         val mainPanel = JPanel()
         mainPanel.layout = BoxLayout(mainPanel, BoxLayout.Y_AXIS)
         
-        // ===== 基本设置面板 =====
-        val enablePanel = createSectionPanel("基本设置")
+        // 初始化 enabledCheckbox（保留但不显示，保持 API 兼容）
         enabledCheckbox = JCheckBox("启用 TLS 指纹伪装", true)
-        enabledCheckbox.font = Font(Font.SANS_SERIF, Font.PLAIN, 13)
-        enabledCheckbox.addActionListener { updateStatus() }
-        enablePanel.add(enabledCheckbox)
-        mainPanel.add(enablePanel)
+        
+        // ===== 代理模式面板 =====
+        val modePanel = createSectionPanel("代理模式")
+        val modeRow = JPanel(FlowLayout(FlowLayout.LEFT))
+        modeRow.add(JLabel("模式:"))
+        modeComboBox = JComboBox(arrayOf("透明模式 (兼容性好)", "指纹伪装模式 (自动回退)"))
+        modeComboBox.selectedIndex = 0
+        modeComboBox.addActionListener { 
+            restartProxyWithNewMode()
+        }
+        modeRow.add(modeComboBox)
+        modePanel.add(modeRow)
+        
+        val modeHint = JLabel("<html><font color='gray'>透明模式：直接转发，兼容所有网站<br>指纹伪装模式：修改 TLS 指纹，失败时自动回退到透明模式</font></html>")
+        modeHint.font = Font(Font.SANS_SERIF, Font.PLAIN, 11)
+        modePanel.add(modeHint)
+        mainPanel.add(modePanel)
         
         mainPanel.add(Box.createVerticalStrut(10))
         
@@ -164,21 +177,20 @@ class TlsConfigPanel(
         val infoPanel = createSectionPanel("使用说明")
         infoPanel.layout = BorderLayout()
         
+        val proxyPort = proxyManager.getProxyPort()
         val infoText = JTextArea("""
-本插件通过本地 Go 代理服务器实现 TLS 指纹伪装，可以：
+【配置步骤】（必须）
+1. 打开 Settings -> Network -> Connections
+2. 找到 Upstream proxy servers，点击 Add
+3. 填写: Destination host: *
+         Proxy host: 127.0.0.1
+         Proxy port: $proxyPort
+4. 保存后即可使用
 
-1. 随机化 TLS 指纹 - 每次请求使用不同的随机指纹
-2. 模拟浏览器指纹 - 伪装成 Chrome、Firefox、Safari 等
-3. 自定义 JA3 指纹 - 输入任意 JA3 字符串
-4. 绕过 WAF 检测 - 避免基于 JA3 指纹的封锁
-
-JA3 格式说明：
-TLSVersion,CipherSuites,Extensions,EllipticCurves,ECPointFormats
-例如: 771,4865-4866-4867-49195,0-23-65281-10-11,29-23-24,0
-
-工作原理：
-- 插件拦截 HTTPS 请求，转发到本地 Go 代理
-- Go 代理使用 uTLS 库以指定的 TLS 指纹与目标建立连接
+【功能说明】
+- 随机化 TLS 指纹 - 绕过 JA3 指纹检测
+- 模拟浏览器指纹 - Chrome、Firefox、Safari 等
+- 自定义 JA3 指纹 - 输入任意 JA3 字符串
         """.trimIndent())
         infoText.isEditable = false
         infoText.font = Font(Font.SANS_SERIF, Font.PLAIN, 12)
@@ -250,7 +262,7 @@ TLSVersion,CipherSuites,Extensions,EllipticCurves,ECPointFormats
             try {
                 proxyManager.stop()
                 Thread.sleep(1000)
-                proxyManager.start()
+                proxyManager.start(getSelectedMode(), getSelectedFingerprint())
                 SwingUtilities.invokeLater { updateStatus() }
             } catch (e: Exception) {
                 SwingUtilities.invokeLater {
@@ -259,6 +271,15 @@ TLSVersion,CipherSuites,Extensions,EllipticCurves,ECPointFormats
                 }
             }
         }.start()
+    }
+    
+    private fun restartProxyWithNewMode() {
+        if (!proxyManager.isRunning()) return
+        restartProxy()
+    }
+    
+    fun getSelectedMode(): String {
+        return if (modeComboBox.selectedIndex == 0) "transparent" else "fingerprint"
     }
     
     fun isTlsEnabled(): Boolean = enabledCheckbox.isSelected

@@ -16,8 +16,10 @@ import (
 )
 
 var (
-	port    int
-	verbose bool
+	port        int
+	verbose     bool
+	fingerprint string
+	mode        string // "transparent" or "fingerprint"
 )
 
 // 预定义的指纹列表
@@ -50,14 +52,16 @@ var randomFingerprintPool = []utls.ClientHelloID{
 
 func main() {
 	flag.IntVar(&port, "port", 18443, "Proxy server port")
-	flag.BoolVar(&verbose, "verbose", true, "Enable verbose logging")
+	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
+	flag.StringVar(&fingerprint, "fingerprint", "chrome_120", "TLS fingerprint to use")
+	flag.StringVar(&mode, "mode", "transparent", "Proxy mode: transparent or fingerprint")
 	flag.Parse()
 
 	rand.Seed(time.Now().UnixNano())
 
-	log.Printf("Starting TLS Fingerprint Proxy on port %d", port)
+	log.Printf("Starting TLS Proxy on port %d, mode: %s, fingerprint: %s", port, mode, fingerprint)
 
-	// 启动 TCP 代理服务器（处理 CONNECT 隧道）
+	// 启动 TCP 代理服务器
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		log.Fatalf("Failed to start listener: %v", err)
@@ -84,14 +88,18 @@ func handleConnection(clientConn net.Conn) {
 	// 读取第一行请求
 	requestLine, err := reader.ReadString('\n')
 	if err != nil {
-		log.Printf("Error reading request: %v", err)
+		if verbose {
+			log.Printf("Error reading request: %v", err)
+		}
 		return
 	}
 
 	// 解析请求
 	parts := strings.Fields(requestLine)
 	if len(parts) < 3 {
-		log.Printf("Invalid request line: %s", requestLine)
+		if verbose {
+			log.Printf("Invalid request line: %s", requestLine)
+		}
 		return
 	}
 
@@ -100,107 +108,165 @@ func handleConnection(clientConn net.Conn) {
 
 	// 读取所有头部
 	headers := make(map[string]string)
+	var rawHeaders []string
+	rawHeaders = append(rawHeaders, requestLine)
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil || line == "\r\n" || line == "\n" {
+			rawHeaders = append(rawHeaders, line)
 			break
 		}
-		line = strings.TrimSpace(line)
-		if idx := strings.Index(line, ":"); idx > 0 {
-			key := strings.TrimSpace(line[:idx])
-			value := strings.TrimSpace(line[idx+1:])
+		rawHeaders = append(rawHeaders, line)
+		trimmed := strings.TrimSpace(line)
+		if idx := strings.Index(trimmed, ":"); idx > 0 {
+			key := strings.TrimSpace(trimmed[:idx])
+			value := strings.TrimSpace(trimmed[idx+1:])
 			headers[key] = value
 		}
 	}
 
-	// 获取指纹配置
-	fingerprintID := headers["X-TLS-Fingerprint"]
-	if fingerprintID == "" {
-		fingerprintID = "chrome_120" // 默认使用 Chrome 指纹
-	}
-
-	if verbose {
-		log.Printf("Method: %s, Target: %s, Fingerprint: %s", method, target, fingerprintID)
-	}
-
 	if method == "CONNECT" {
 		// 处理 HTTPS CONNECT 隧道
-		handleConnect(clientConn, target, fingerprintID)
+		handleConnect(clientConn, reader, target)
 	} else {
-		// 处理普通 HTTP 请求（转发到 HTTPS）
-		handleHTTPRequest(clientConn, reader, method, target, headers, fingerprintID)
+		// 处理普通 HTTP 请求（直接转发）
+		handleHTTP(clientConn, reader, target, headers, rawHeaders)
 	}
 }
 
-func handleConnect(clientConn net.Conn, target string, fingerprintID string) {
+func handleConnect(clientConn net.Conn, reader *bufio.Reader, target string) {
 	// 解析目标地址
-	host, port, err := parseTarget(target)
+	host, portStr, err := parseTarget(target)
 	if err != nil {
 		log.Printf("Invalid target: %s", target)
 		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 		return
 	}
 
-	targetAddr := fmt.Sprintf("%s:%s", host, port)
+	targetAddr := fmt.Sprintf("%s:%s", host, portStr)
 
 	if verbose {
-		log.Printf("CONNECT to %s with fingerprint %s", targetAddr, fingerprintID)
+		log.Printf("CONNECT to %s (mode: %s)", targetAddr, mode)
 	}
 
-	// 建立到目标的 TLS 连接
-	destConn, err := dialTLS(targetAddr, host, fingerprintID)
+	// 建立 TCP 连接到目标
+	tcpConn, err := net.DialTimeout("tcp", targetAddr, 30*time.Second)
 	if err != nil {
 		log.Printf("Failed to connect to %s: %v", targetAddr, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
 		return
 	}
-	defer destConn.Close()
 
+	if mode == "fingerprint" {
+		// 指纹伪装模式：使用 uTLS 建立 TLS 连接
+		handleConnectWithFingerprint(clientConn, tcpConn, host, targetAddr)
+	} else {
+		// 透明模式：直接转发
+		handleConnectTransparent(clientConn, tcpConn)
+	}
+}
+
+// 透明模式：直接转发 TCP 数据
+func handleConnectTransparent(clientConn net.Conn, tcpConn net.Conn) {
 	// 发送 200 Connection Established
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
-	// 双向转发数据
+	// 双向转发
 	var wg sync.WaitGroup
 	wg.Add(2)
 
 	go func() {
 		defer wg.Done()
-		io.Copy(destConn, clientConn)
+		io.Copy(tcpConn, clientConn)
+		tcpConn.Close()
 	}()
 
 	go func() {
 		defer wg.Done()
-		io.Copy(clientConn, destConn)
+		io.Copy(clientConn, tcpConn)
 	}()
 
 	wg.Wait()
 }
 
-func handleHTTPRequest(clientConn net.Conn, reader *bufio.Reader, method, target string, headers map[string]string, fingerprintID string) {
-	// 解析 URL
-	host := headers["Host"]
-	if host == "" {
-		host = headers["X-TLS-Target-Host"]
+// 指纹伪装模式：使用 uTLS
+func handleConnectWithFingerprint(clientConn net.Conn, tcpConn net.Conn, host, targetAddr string) {
+	// 使用 uTLS 建立 TLS 连接
+	clientHelloID := getClientHelloID(fingerprint)
+	config := &utls.Config{
+		ServerName:         host,
+		InsecureSkipVerify: true,
 	}
+	tlsConn := utls.UClient(tcpConn, config, clientHelloID)
+
+	err := tlsConn.Handshake()
+	if err != nil {
+		log.Printf("TLS handshake failed for %s: %v, falling back to transparent mode", targetAddr, err)
+		tcpConn.Close()
+		// 回退到透明模式
+		newTcpConn, err := net.DialTimeout("tcp", targetAddr, 30*time.Second)
+		if err != nil {
+			clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+			return
+		}
+		handleConnectTransparent(clientConn, newTcpConn)
+		return
+	}
+
+	if verbose {
+		state := tlsConn.ConnectionState()
+		log.Printf("TLS connected to %s (version: %x, cipher: %x)", targetAddr, state.Version, state.CipherSuite)
+	}
+
+	// 发送 200 Connection Established
+	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+
+	// 双向转发：Burp(明文) <-> Go代理 <-> 目标(TLS)
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		io.Copy(tlsConn, clientConn)
+		tlsConn.Close()
+	}()
+
+	go func() {
+		defer wg.Done()
+		io.Copy(clientConn, tlsConn)
+	}()
+
+	wg.Wait()
+}
+
+func handleHTTP(clientConn net.Conn, reader *bufio.Reader, target string, headers map[string]string, rawHeaders []string) {
+	// 解析 URL 获取目标主机
+	host := headers["Host"]
 	if host == "" {
 		log.Printf("No host specified")
 		clientConn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
 		return
 	}
 
-	port := "443"
-	if p := headers["X-TLS-Target-Port"]; p != "" {
-		port = p
+	// 从 Host 中提取端口
+	portStr := "80"
+	hostOnly := host
+	if strings.Contains(host, ":") {
+		h, p, err := net.SplitHostPort(host)
+		if err == nil {
+			hostOnly = h
+			portStr = p
+		}
 	}
 
-	targetAddr := fmt.Sprintf("%s:%s", host, port)
+	targetAddr := fmt.Sprintf("%s:%s", hostOnly, portStr)
 
 	if verbose {
-		log.Printf("HTTP request to %s with fingerprint %s", targetAddr, fingerprintID)
+		log.Printf("HTTP request to %s", targetAddr)
 	}
 
-	// 建立 TLS 连接
-	destConn, err := dialTLS(targetAddr, host, fingerprintID)
+	// 建立 TCP 连接（HTTP 不需要 TLS）
+	destConn, err := net.DialTimeout("tcp", targetAddr, 30*time.Second)
 	if err != nil {
 		log.Printf("Failed to connect to %s: %v", targetAddr, err)
 		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
@@ -208,27 +274,19 @@ func handleHTTPRequest(clientConn net.Conn, reader *bufio.Reader, method, target
 	}
 	defer destConn.Close()
 
-	// 重建请求
-	path := target
-	if strings.HasPrefix(target, "http") {
-		// 提取路径
-		if idx := strings.Index(target[8:], "/"); idx >= 0 {
-			path = target[8+idx:]
-		} else {
-			path = "/"
-		}
+	// 转发原始请求头
+	for _, line := range rawHeaders {
+		destConn.Write([]byte(line))
 	}
 
-	// 发送请求行
-	fmt.Fprintf(destConn, "%s %s HTTP/1.1\r\n", method, path)
-
-	// 发送头部（排除自定义头）
-	for key, value := range headers {
-		if !strings.HasPrefix(key, "X-TLS-") && key != "Proxy-Connection" {
-			fmt.Fprintf(destConn, "%s: %s\r\n", key, value)
+	// 如果有请求体，转发请求体
+	if contentLength := headers["Content-Length"]; contentLength != "" {
+		var length int64
+		fmt.Sscanf(contentLength, "%d", &length)
+		if length > 0 {
+			io.CopyN(destConn, reader, length)
 		}
 	}
-	fmt.Fprintf(destConn, "\r\n")
 
 	// 转发响应
 	io.Copy(clientConn, destConn)

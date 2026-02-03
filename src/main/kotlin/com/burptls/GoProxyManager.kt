@@ -26,7 +26,7 @@ class GoProxyManager(
     /**
      * 启动 Go 代理服务器
      */
-    fun start() {
+    fun start(mode: String = "transparent", fingerprint: String = "chrome_120") {
         if (isRunning) {
             stdout.println("[GoProxyManager] Proxy already running")
             return
@@ -34,21 +34,23 @@ class GoProxyManager(
         
         // 查找可用端口
         proxyPort = findAvailablePort(DEFAULT_PORT)
-        stdout.println("[GoProxyManager] Using port: $proxyPort")
+        stdout.println("[GoProxyManager] Using port: $proxyPort, mode: $mode")
         
         // 提取并启动代理二进制文件
         val proxyBinary = extractProxyBinary()
         if (proxyBinary == null) {
             stderr.println("[GoProxyManager] Failed to extract proxy binary")
             stdout.println("[GoProxyManager] Please ensure tls-proxy is running on port $proxyPort")
-            stdout.println("[GoProxyManager] Run: ./tls-proxy -port $proxyPort")
+            stdout.println("[GoProxyManager] Run: ./tls-proxy -port $proxyPort -mode $mode")
             return
         }
         
         try {
             val processBuilder = ProcessBuilder(
                 proxyBinary.absolutePath,
-                "-port", proxyPort.toString()
+                "-port", proxyPort.toString(),
+                "-mode", mode,
+                "-fingerprint", fingerprint
             )
             processBuilder.redirectErrorStream(true)
             

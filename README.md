@@ -4,23 +4,25 @@
 
 ## 功能特性
 
+- **双模式支持** - 透明模式（兼容性好）和指纹伪装模式（自动回退）
 - **TLS 指纹随机化** - 每次请求生成不同的随机 JA3 指纹
 - **浏览器指纹模拟** - 伪装成 Chrome、Firefox、Safari、Edge 等主流浏览器
 - **自定义 JA3 指纹** - 支持输入任意 JA3 字符串
-- **绕过 WAF 检测** - 避免 CloudFlare、Akamai、PerimeterX 等基于 JA3 的封锁
+- **绕过 WAF 检测** - 避免 CloudFlare、Akamai 等基于 JA3 的封锁
 
 ## 架构原理
 
 ```
-┌─────────────┐      ┌─────────────────┐      ┌──────────────┐
-│  Burp Suite │─HTTP─▶│  Go TLS Proxy   │─TLS─▶│ Target Server│
-│  Extension  │      │  (uTLS Library) │      │              │
-└─────────────┘      └─────────────────┘      └──────────────┘
+┌──────────┐      ┌─────────────────┐      ┌──────────────┐
+│   Burp   │─────▶│  Go TLS Proxy   │─────▶│ Target Server│
+│  Suite   │      │  (uTLS Library) │      │              │
+└──────────┘      └─────────────────┘      └──────────────┘
+                         │
+            ┌────────────┴────────────┐
+            │                         │
+      透明模式                   指纹伪装模式
+   (直接TCP转发)              (uTLS修改指纹)
 ```
-
-1. Burp 扩展拦截 HTTPS 请求，通过 HTTP 转发到本地 Go 代理
-2. Go 代理使用 [uTLS](https://github.com/refraction-networking/utls) 库以指定的 TLS 指纹与目标建立连接
-3. 实现 JA3 指纹伪装，绕过 WAF 检测
 
 ## 安装
 
@@ -30,13 +32,6 @@
 2. 在 Burp Suite 中：`Extensions` → `Add` → 选择下载的 JAR 文件
 
 ### 方式二：从源码构建
-
-**前置要求：**
-- Go 1.21+
-- JDK 17+ (或 21)
-- Gradle 8.0+
-
-**构建步骤：**
 
 ```bash
 # 1. 编译 Go 代理
@@ -53,12 +48,25 @@ cd ..
 
 ## 使用方法
 
-1. 加载扩展后，在 Burp Suite 中会出现 `TLS Fingerprint` 标签页
-2. 勾选 **启用 TLS 指纹伪装**
-3. 选择指纹类型：
-   - **预设指纹** - Chrome、Firefox、Safari 等
-   - **自定义指纹** - 输入任意 JA3 字符串
-4. 正常使用 Burp 进行测试
+### 1. 加载扩展
+在 Burp Suite 中加载 `burp-tls-fingerprint.jar`
+
+### 2. 配置上游代理（必须）
+1. 打开 `Settings` → `Network` → `Connections`
+2. 找到 `Upstream proxy servers`，点击 `Add`
+3. 填写：
+   - **Destination host**: `*`
+   - **Proxy host**: `127.0.0.1`
+   - **Proxy port**: `18443`
+4. 保存配置
+
+### 3. 选择代理模式
+- **透明模式**（默认）- 直接转发，兼容所有网站
+- **指纹伪装模式** - 修改 TLS 指纹，失败时自动回退到透明模式
+
+### 4. 选择指纹类型
+- 预设指纹：Chrome、Firefox、Safari 等
+- 自定义指纹：输入任意 JA3 字符串
 
 ## 支持的指纹
 
@@ -74,17 +82,6 @@ cd ..
 | curl | curl/8.x |
 | OkHttp | OkHttp 4.x |
 
-## JA3 指纹格式
-
-```
-TLSVersion,CipherSuites,Extensions,EllipticCurves,ECPointFormats
-```
-
-示例：
-```
-771,4865-4866-4867-49195-49199-49196-49200-52393-52392-49171-49172-156-157-47-53,0-23-65281-10-11-35-16-5-13-18-51-45-43-27-21,29-23-24,0
-```
-
 ## 项目结构
 
 ```
@@ -94,9 +91,8 @@ burp_tls/
 │   ├── TlsConfigPanel.kt    # UI 配置面板
 │   └── GoProxyManager.kt    # Go 代理管理器
 ├── go-proxy/
-│   ├── main.go              # Go TLS 代理服务器
-│   └── fingerprints.go      # JA3 指纹生成
-├── build.gradle.kts         # Gradle 构建配置
+│   └── main.go              # Go TLS 代理服务器
+├── build.gradle.kts
 └── README.md
 ```
 
@@ -105,7 +101,6 @@ burp_tls/
 - [burp-awesome-tls](https://github.com/sleeyax/burp-awesome-tls)
 - [uTLS](https://github.com/refraction-networking/utls)
 - [Yakit](https://github.com/yaklang/yakit)
-- [JA3](https://github.com/salesforce/ja3)
 
 ## License
 
