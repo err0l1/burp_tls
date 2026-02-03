@@ -1,0 +1,35 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Kotlin
+*.class
+*.log
+*.jar
+!gradle-wrapper.jar
+
+# Go
+go-proxy/tls-proxy
+go-proxy/tls-proxy.exe
+
+# Native binaries
+src/main/resources/native/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build output
+burp-tls-fingerprint.jar
+
+# Temp
+*.tmp
+*.temp
